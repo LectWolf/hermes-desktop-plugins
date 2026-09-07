@@ -9,11 +9,15 @@
 
 ## 安装
 
-把对应文件夹复制到 Hermes 的 `desktop-plugins` 目录（文件夹名必须和插件 `id` 一致）。
+从 [Releases](https://github.com/LectWolf/hermes-desktop-plugins/releases) 下载 zip，解压到 Hermes 的 `desktop-plugins` 目录（文件夹名必须是 `turn-usage` / `compress-context`）。
 
 - Windows：`%LOCALAPPDATA%\hermes\desktop-plugins\`
 - macOS / Linux：`~/.hermes/desktop-plugins/`
 - 若设置了 `HERMES_HOME`，则是 `$HERMES_HOME/desktop-plugins/`
+
+装好后打开桌面端，`Ctrl+K`（macOS：`⌘K`）→ **Reload desktop plugins**。每个插件只需 `plugin.js`。
+
+也可以 clone 源码后复制文件夹：
 
 ```bash
 git clone https://github.com/LectWolf/hermes-desktop-plugins.git
@@ -28,7 +32,14 @@ cp -r compress-context "$LOCALAPPDATA/hermes/desktop-plugins/"
 # cp -r compress-context ~/.hermes/desktop-plugins/
 ```
 
-每个插件只需 `plugin.js`。装好后打开桌面端，`Ctrl+K`（macOS：`⌘K`）→ **Reload desktop plugins**。
+## 发版
+
+打 `v*` 标签并推送后，GitHub Actions 会打包 zip 并创建 Release：
+
+```bash
+git tag v1.0.1
+git push origin v1.0.1
+```
 
 ---
 

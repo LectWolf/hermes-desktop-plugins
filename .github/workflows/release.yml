@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pack plugin zips
+        run: |
+          set -euo pipefail
+          mkdir -p dist staging/turn-usage staging/compress-context
+          cp turn-usage/plugin.js staging/turn-usage/
+          cp compress-context/plugin.js staging/compress-context/
+          (cd staging && zip -r ../dist/turn-usage.zip turn-usage)
+          (cd staging && zip -r ../dist/compress-context.zip compress-context)
+          (cd staging && zip -r ../dist/hermes-desktop-plugins.zip turn-usage compress-context)
+          ls -la dist
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/notes.md <<'MD'
+          解压到 Hermes 的 `desktop-plugins` 目录后，`Ctrl+K`（macOS：`⌘K`）→ **Reload desktop plugins**。
+
+          - Windows：`%LOCALAPPDATA%\hermes\desktop-plugins\`
+          - macOS / Linux：`~/.hermes/desktop-plugins/`
+
+          附件：
+          - `turn-usage.zip`
+          - `compress-context.zip`
+          - `hermes-desktop-plugins.zip`（两个插件打包）
+          MD
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/turn-usage.zip \
+            dist/compress-context.zip \
+            dist/hermes-desktop-plugins.zip \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file /tmp/notes.md \
+            --verify-tag
