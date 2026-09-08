@@ -67,6 +67,7 @@ const $live = atom({
 const $completed = atom({})
 const $sessionClock = atom({ sessionId: null, startedAt: 0 })
 const $effort = atom('')
+const $sessionModel = atom('')
 const $daily = atom({ date: '', usd: 0 })
 const $lastTurn = atom(null)
 
@@ -113,6 +114,7 @@ function snapUsage(usage) {
   let cache = 0
   if (hit != null && billed > 0) cache = billed * (Math.max(0, Math.min(100, hit)) / 100)
   else if (promptField > uncached) cache = promptField - uncached
+  if (typeof usage.model === 'string') rememberModel(usage.model)
   const avgRaw = usage.avg_latency_s
   return {
     input: uncached,
@@ -312,7 +314,12 @@ function prettyModel(slug) {
   const raw = String(slug || '').trim()
   if (!raw) return ''
   let id = raw.split('/').pop()
-  id = id.replace(/^grok-/i, 'Grok ').replace(/^gpt-/i, 'GPT-').replace(/^claude-/i, 'Claude ')
+  id = id
+    .replace(/^grok-/i, 'Grok ')
+    .replace(/^gpt-/i, 'GPT-')
+    .replace(/^claude-/i, 'Claude ')
+    .replace(/^kimi-/i, 'Kimi ')
+    .replace(/^moonshotai\//i, '')
   id = id.replace(/-/g, ' ')
   return id.replace(/\s+/g, ' ').trim()
 }
@@ -509,7 +516,7 @@ function ensureBadge(hostNode, row) {
     })
     wrap.appendChild(badge)
   }
-  const model = row.model || host.state.model.get()
+  const model = row.model || activeModel()
   const effort = row.effort || $effort.get()
   ensureStyle()
   renderSegments(badge, lineParts(row, { model, effort }), { tight: true })
@@ -518,36 +525,66 @@ function ensureBadge(hostNode, row) {
   hostNode.setAttribute(HOST_ATTR, row.id)
 }
 
-function findTarget(scope, row, roots) {
-  if (row.messageId) {
-    const escaped = row.messageId.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-    const tagged = scope.querySelector(`[data-message-id="${escaped}"]`)
-    if (tagged) {
-      return tagged.matches?.('[data-slot="aui_assistant-message-root"]')
-        ? tagged
-        : tagged.querySelector('[data-slot="aui_assistant-message-root"]') ||
-            tagged.closest('[data-slot="aui_assistant-message-root"]')
+function storedSessionId() {
+  try {
+    const id = host.state.focusedStoredSessionId?.get?.()
+    return typeof id === 'string' ? id.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
+function sessionLookupKeys(row) {
+  return [...new Set([row?.storedSessionId, row?.sessionId, storedSessionId(), host.state.focusedSessionId.get()].filter(Boolean))]
+}
+
+function listForSession() {
+  const map = $completed.get()
+  const seen = new Set()
+  const list = []
+  for (const key of sessionLookupKeys()) {
+    for (const item of map[key] || []) {
+      if (!item || seen.has(item.id)) continue
+      seen.add(item.id)
+      list.push(item)
     }
   }
-  if (row.rootIndex != null && roots[row.rootIndex] && !isStreaming(roots[row.rootIndex])) {
-    return roots[row.rootIndex]
-  }
-  return null
+  list.sort((a, b) => turnTime(a) - turnTime(b) || String(a.id).localeCompare(String(b.id)))
+  return list
+}
+
+function findTarget(scope, row) {
+  if (!row?.messageId) return null
+  const escaped = row.messageId.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  const tagged = scope.querySelector(`[data-message-id="${escaped}"]`)
+  if (!tagged) return null
+  return tagged.matches?.('[data-slot="aui_assistant-message-root"]')
+    ? tagged
+    : tagged.querySelector('[data-slot="aui_assistant-message-root"]') ||
+        tagged.closest('[data-slot="aui_assistant-message-root"]')
 }
 
 function rehomeAll() {
-  const sessionId = host.state.focusedSessionId.get()
-  const list = ($completed.get()[sessionId] || []).slice()
+  const list = listForSession()
   if (!list.length) return
   const scope = paneRoot(anchorEl)
-  const roots = assistantRoots(scope)
+  const roots = assistantRoots(scope).filter(root => !isStreaming(root))
   const used = new Set()
-  for (const row of list.slice().reverse()) {
-    const target = findTarget(scope, row, roots)
-    if (!target || used.has(target)) continue
-    used.add(target)
-    ensureBadge(target, row)
+  const unmatched = []
+  for (const row of list) {
+    const target = findTarget(scope, row)
+    if (target && !used.has(target)) {
+      used.add(target)
+      ensureBadge(target, row)
+    } else unmatched.push(row)
   }
+  const free = roots.filter(root => !used.has(root))
+  const offset = Math.max(0, free.length - unmatched.length)
+  unmatched.forEach((row, i) => {
+    const target = free[offset + i]
+    if (!target) return
+    ensureBadge(target, row)
+  })
 }
 
 function scheduleRehome() {
@@ -563,18 +600,55 @@ function persistCompleted(map) {
   void Promise.resolve(pluginStorage.set(STORAGE_KEY, map)).catch(() => undefined)
 }
 
+function turnTime(row) {
+  return num(row?.startedAt) || num(String(row?.id || '').match(/(\d+)$/)?.[1])
+}
+
+function mergeTurnLists(...lists) {
+  const seen = new Set()
+  const out = []
+  for (const list of lists) {
+    for (const item of list || []) {
+      if (!item || seen.has(item.id)) continue
+      seen.add(item.id)
+      out.push(item)
+    }
+  }
+  out.sort((a, b) => turnTime(a) - turnTime(b) || String(a.id).localeCompare(String(b.id)))
+  return out.slice(-MAX_TURNS)
+}
+
 function pushCompleted(row) {
-  const sid = row.sessionId || '_'
+  const keys = [...new Set([row.storedSessionId, row.sessionId].filter(Boolean))]
+  if (!keys.length) keys.push('_')
   const map = { ...$completed.get() }
-  const list = [...(map[sid] || [])].filter(item => {
-    if (item.id === row.id) return false
-    if (row.messageId && item.messageId && item.messageId === row.messageId) return false
+  const merged = mergeTurnLists(...keys.map(key => map[key]), [row]).filter(item => {
+    if (item.id === row.id && item !== row) return false
+    if (row.messageId && item.messageId && item.messageId === row.messageId && item.id !== row.id) return false
     return true
   })
-  list.push(row)
-  map[sid] = list.slice(-MAX_TURNS)
+  if (!merged.some(item => item.id === row.id)) merged.push(row)
+  const list = mergeTurnLists(merged)
+  for (const key of keys) map[key] = list
   $completed.set(map)
   persistCompleted(map)
+}
+
+function aliasSession(runtime, stored) {
+  if (!runtime || !stored || runtime === stored) return
+  const map = { ...$completed.get() }
+  const list = mergeTurnLists(map[runtime], map[stored])
+  if (!list.length) return
+  map[runtime] = list
+  map[stored] = list
+  $completed.set(map)
+  persistCompleted(map)
+}
+
+function syncLastTurn() {
+  const list = listForSession()
+  const last = list[list.length - 1]
+  if (last) $lastTurn.set(last)
 }
 
 function composerRoot() {
@@ -761,7 +835,7 @@ function deltaSnap(from, to) {
   const costDelta =
     to.cost != null && from.cost != null
       ? Math.max(0, to.cost - from.cost)
-      : estimateBuckets({ billed, uncached, cache, cacheWrite, output, calls: Math.max(1, calls) }, host.state.model.get())
+      : estimateBuckets({ billed, uncached, cache, cacheWrite, output, calls: Math.max(1, calls) }, activeModel())
   return {
     input: billed,
     prompt: billed,
@@ -836,10 +910,12 @@ function finishTurn(sessionId) {
   const row = {
     id: `${live.sessionId || sessionId || 'turn'}-${startedAt}`,
     sessionId: live.sessionId || sessionId,
+    storedSessionId: storedSessionId() || undefined,
+    startedAt,
     durationSec: Math.max(0, (now - startedAt) / 1000),
     messageId: messageKey(found.root),
     rootIndex: found.index,
-    model: host.state.model.get(),
+    model: activeModel(),
     effort: $effort.get(),
     input: billed,
     prompt: billed,
@@ -925,7 +1001,9 @@ function Anchor() {
   const sessionId = useValue(host.state.focusedSessionId)
   const live = useValue($live)
   const usage = useValue(host.state.focusedUsage)
-  const model = useValue(host.state.model)
+  const pickerModel = useValue(host.state.model)
+  const sessionModel = useValue($sessionModel)
+  const model = sessionModel || pickerModel
   const effort = useValue($effort)
   const lastTurn = useValue($lastTurn)
   const daily = useValue($daily)
@@ -972,6 +1050,35 @@ function rememberEffort(value) {
   if (next && next !== $effort.get()) $effort.set(next)
 }
 
+function rememberModel(value) {
+  if (typeof value !== 'string') return
+  const next = value.trim()
+  if (next && next !== $sessionModel.get()) $sessionModel.set(next)
+}
+
+function activeModel() {
+  return $sessionModel.get() || host.state.model.get() || ''
+}
+
+function applySessionInfo(info) {
+  if (!info || typeof info !== 'object') return
+  rememberEffort(info.reasoning_effort)
+  rememberModel(info.model)
+  const stored = typeof info.stored_session_id === 'string' ? info.stored_session_id.trim() : ''
+  const runtime = host.state.focusedSessionId.get()
+  if (stored && runtime) aliasSession(runtime, stored)
+  syncLastTurn()
+  scheduleRehome()
+}
+
+function pullSessionInfo(sessionId) {
+  if (!sessionId) return
+  void host
+    .request('session.info', { session_id: sessionId })
+    .then(applySessionInfo)
+    .catch(() => undefined)
+}
+
 function bindEvents(ctx) {
   startObserver()
   const unsubs = []
@@ -1002,16 +1109,31 @@ function bindEvents(ctx) {
   unsubs.push(
     host.onEvent('session.info', event => {
       const payload = event?.payload || {}
-      rememberEffort(payload.reasoning_effort)
+      const sid = payload.session_id || event?.session_id
+      const focused = host.state.focusedSessionId.get()
+      if (sid && focused && sid !== focused) return
+      applySessionInfo(payload)
     })
   )
-  const sessionId = host.state.focusedSessionId.get()
-  if (sessionId) {
-    void host
-      .request('session.info', { session_id: sessionId })
-      .then(info => rememberEffort(info?.reasoning_effort))
-      .catch(() => undefined)
+  unsubs.push(
+    watchAtom(host.state.focusedSessionId, sessionId => {
+      pullSessionInfo(sessionId)
+      syncLastTurn()
+      scheduleRehome()
+    })
+  )
+  if (host.state.focusedStoredSessionId) {
+    unsubs.push(
+      watchAtom(host.state.focusedStoredSessionId, () => {
+        const runtime = host.state.focusedSessionId.get()
+        const stored = storedSessionId()
+        if (runtime && stored) aliasSession(runtime, stored)
+        syncLastTurn()
+        scheduleRehome()
+      })
+    )
   }
+  pullSessionInfo(host.state.focusedSessionId.get())
   if (typeof ctx.onDispose === 'function') {
     ctx.onDispose(() => {
       unsubs.forEach(fn => {
@@ -1042,7 +1164,11 @@ export default {
     if (typeof ctx.storage?.get === 'function') {
       void Promise.resolve(ctx.storage.get(STORAGE_KEY))
         .then(saved => {
-          if (saved && typeof saved === 'object') $completed.set(saved)
+          if (saved && typeof saved === 'object') {
+            $completed.set(saved)
+            syncLastTurn()
+            scheduleRehome()
+          }
         })
         .catch(() => undefined)
       void Promise.resolve(ctx.storage.get(DAILY_KEY))

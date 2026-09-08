@@ -24,6 +24,25 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const ID = 'compress-context'
 const COMPRESS_TIMEOUT_MS = 660_000
 const $compressing = atom(false)
+const STYLE_ID = 'compress-context-style'
+
+function ensureStyle() {
+  let style = document.getElementById(STYLE_ID)
+  if (!style) {
+    style = document.createElement('style')
+    style.id = STYLE_ID
+    document.head.appendChild(style)
+  }
+  style.textContent = `
+    [data-compress-context-btn] {
+      margin-left: auto;
+      flex: 0 0 auto;
+    }
+    [data-compress-context-btn] + * {
+      margin-left: 0 !important;
+    }
+  `
+}
 
 function notify(kind, message) {
   host.notify({ kind, message })
@@ -100,7 +119,8 @@ function CompressButton() {
   const tip = !sessionId ? t('noSession') : busy ? t('waitBusy') : compressing ? t('working') : t('tip')
 
   return jsxs('span', {
-    className: 'inline-flex',
+    'data-compress-context-btn': '1',
+    className: 'inline-flex shrink-0',
     children: [
       jsx(Tip, {
         label: tip,
@@ -147,6 +167,7 @@ export default {
   name: 'Compress Context',
   description: 'Composer button and ⌘K command to compress the current session context.',
   register(ctx) {
+    ensureStyle()
     ctx.i18n.register({
       en: {
         tip: 'Compress context',
